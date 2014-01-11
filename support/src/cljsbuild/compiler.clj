@@ -9,6 +9,7 @@
     [cljs.closure :as closure]
     [clojure.string :as string]
     [clojure.java.io :as io]
+    [clojure.walk :as walk]
     [fs.core :as fs]))
 
 (def reset-color "\u001b[0m")
@@ -43,6 +44,22 @@
   (-compile [_ opts]
     (mapcat #(closure/-compile % opts) paths)))
 
+(defn strip-attrs
+  [m & attrs]
+  (walk/prewalk (fn [x]
+                  (let [out (if (map? x)
+                              (apply dissoc x attrs)
+                              x)]
+                    out))
+                m))
+
+
+(defn trim-analysis
+  [analysis]
+  (-> analysis
+      (select-keys [:cljs.analyzer/constant-table :cljs.analyzer/namespaces])
+      (strip-attrs :method-params :env)))
+
 (defn- compile-cljs [cljs-paths compiler-options notify-command incremental? assert? watching?]
   (let [output-file (:output-to compiler-options)
         output-file-dir (fs/parent output-file)]
@@ -54,8 +71,17 @@
       (fs/mkdirs output-file-dir))
     (let [started-at (System/currentTimeMillis)]
       (try
-        (binding [*assert* assert?]
-          (build (SourcePaths. cljs-paths) compiler-options))
+        (binding [*assert* assert?
+                  cljs.env/*compiler* (cljs.env/default-compiler-env)]
+          (build (SourcePaths. cljs-paths) compiler-options)
+          ;; TODO: take into account various runs somehow?
+          (when-let [dump-analysis-to (:dump-analysis-to compiler-options)]
+            ;; (prn @cljs.env/*compiler*)
+            (println (str "Writing analysis results to \"" dump-analysis-to "\"."))
+            (with-open [f (io/writer (io/file dump-analysis-to))]
+              (binding [*out* f]
+                (prn (trim-analysis @cljs.env/*compiler*) )))
+            (println (str "Finished writing analysis results."))))
         (fs/touch output-file started-at)
         (notify-cljs
           notify-command
